@@ -1,6 +1,6 @@
 use crate::{
-    text_render::GlyphonCacheKey, Cache, ContentType, RasterizeCustomGlyphRequest, FontSystem,
-    GlyphDetails, GpuCacheStatus, RasterizedCustomGlyph, SwashCache,
+    text_render::GlyphonCacheKey, Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus,
+    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, SwashCache,
 };
 use etagere::{size2, Allocation, BucketedAtlasAllocator};
 use lru::LruCache;
@@ -344,9 +344,7 @@ impl TextAtlas {
         cache: &mut SwashCache,
         content_type: ContentType,
         scale_factor: f32,
-        rasterize_custom_glyph: impl FnMut(
-            RasterizeCustomGlyphRequest,
-        ) -> Option<RasterizedCustomGlyph>,
+        rasterize_custom_glyph: impl FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
     ) -> bool {
         let did_grow = match content_type {
             ContentType::Mask => self.mask_atlas.grow(
