@@ -3,9 +3,8 @@ use crate::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, SwashCache,
 };
 use etagere::{size2, Allocation, BucketedAtlasAllocator};
-use lru::LruCache;
 use rustc_hash::FxHasher;
-use std::{collections::HashSet, hash::BuildHasherDefault, sync::Arc};
+use std::{collections::HashMap, hash::BuildHasherDefault, sync::Arc};
 use wgpu::{
     BindGroup, DepthStencilState, Device, Extent3d, ImageCopyTexture, ImageDataLayout,
     MultisampleState, Origin3d, Queue, RenderPipeline, Texture, TextureAspect, TextureDescriptor,
@@ -21,8 +20,7 @@ pub(crate) struct InnerAtlas {
     pub texture_view: TextureView,
     pub packer: BucketedAtlasAllocator,
     pub size: u32,
-    pub glyph_cache: LruCache<GlyphonCacheKey, GlyphDetails, Hasher>,
-    pub glyphs_in_use: HashSet<GlyphonCacheKey, Hasher>,
+    pub glyph_cache: HashMap<GlyphonCacheKey, GlyphDetails, Hasher>,
     pub max_texture_dimension_2d: u32,
 }
 
@@ -53,8 +51,7 @@ impl InnerAtlas {
 
         let texture_view = texture.create_view(&TextureViewDescriptor::default());
 
-        let glyph_cache = LruCache::unbounded_with_hasher(Hasher::default());
-        let glyphs_in_use = HashSet::with_hasher(Hasher::default());
+        let glyph_cache = HashMap::with_hasher(Hasher::default());
 
         Self {
             kind,
@@ -63,44 +60,13 @@ impl InnerAtlas {
             packer,
             size,
             glyph_cache,
-            glyphs_in_use,
             max_texture_dimension_2d,
         }
     }
 
     pub(crate) fn try_allocate(&mut self, width: usize, height: usize) -> Option<Allocation> {
         let size = size2(width as i32, height as i32);
-
-        loop {
-            let allocation = self.packer.allocate(size);
-
-            if allocation.is_some() {
-                return allocation;
-            }
-
-            // Try to free least recently used allocation
-            let (mut key, mut value) = self.glyph_cache.peek_lru()?;
-
-            // Find a glyph with an actual size
-            while value.atlas_id.is_none() {
-                // All sized glyphs are in use, cache is full
-                if self.glyphs_in_use.contains(key) {
-                    return None;
-                }
-
-                let _ = self.glyph_cache.pop_lru();
-
-                (key, value) = self.glyph_cache.peek_lru()?;
-            }
-
-            // All sized glyphs are in use, cache is full
-            if self.glyphs_in_use.contains(key) {
-                return None;
-            }
-
-            let (_, value) = self.glyph_cache.pop_lru().unwrap();
-            self.packer.deallocate(value.atlas_id.unwrap());
-        }
+        self.packer.allocate(size)
     }
 
     pub fn num_channels(&self) -> usize {
@@ -215,10 +181,6 @@ impl InnerAtlas {
 
         true
     }
-
-    fn trim(&mut self) {
-        self.glyphs_in_use.clear();
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,11 +291,6 @@ impl TextAtlas {
             format,
             color_mode,
         }
-    }
-
-    pub fn trim(&mut self) {
-        self.mask_atlas.trim();
-        self.color_atlas.trim();
     }
 
     pub(crate) fn grow(
