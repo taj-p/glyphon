@@ -148,6 +148,8 @@ impl TextRenderer2 {
         queue: &Queue,
         renderable_text_areas: &[RenderableTextArea],
     ) {
+        // TODO: Consider culling
+
         let glyph_vertices = renderable_text_areas
             .iter()
             .flat_map(|renderable_text_area| {
@@ -505,10 +507,8 @@ where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
     let details = if let Some(details) = atlas.mask_atlas.glyph_cache.get(&cache_key) {
-        atlas.mask_atlas.glyphs_in_use.insert(cache_key);
         details
     } else if let Some(details) = atlas.color_atlas.glyph_cache.get(&cache_key) {
-        atlas.color_atlas.glyphs_in_use.insert(cache_key);
         details
     } else {
         let Some(image) = (get_glyph_image)(cache, font_system, &mut rasterize_custom_glyph) else {
@@ -581,9 +581,7 @@ where
             (GpuCacheStatus::SkipRasterization, None, inner)
         };
 
-        inner.glyphs_in_use.insert(cache_key);
-        // Insert the glyph into the cache and return the details reference
-        inner.glyph_cache.get_or_insert(cache_key, || GlyphDetails {
+        inner.glyph_cache.entry(cache_key).or_insert(GlyphDetails {
             width: image.width,
             height: image.height,
             gpu_cache,
