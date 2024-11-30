@@ -410,8 +410,8 @@ impl TextRenderer2 {
         let offset = (text_area.left, text_area.top);
 
         match self.position_mapping {
-            PositionMapping::Pixel => glyph.physical(offset, scale),
-            PositionMapping::Subpixel => {
+            PositionMapping::Subpixel => glyph.physical(offset, scale),
+            PositionMapping::Pixel => {
                 // Fast path for non subpixel rendering.
                 // Avoids calculating the `SubpixelBin`.
                 let x_offset = glyph.font_size * glyph.x_offset;

@@ -9,6 +9,7 @@ mod custom_glyph;
 mod error;
 mod text_atlas;
 mod text_render;
+mod text_render2;
 mod viewport;
 
 pub use cache::Cache;
@@ -17,7 +18,8 @@ pub use custom_glyph::{
 };
 pub use error::{PrepareError, RenderError};
 pub use text_atlas::{ColorMode, TextAtlas};
-pub use text_render::TextRenderer;
+pub use text_render::{Config, TextRenderer};
+pub use text_render2::{PositionMapping, TextRenderer2, TextRenderer2Builder};
 pub use viewport::Viewport;
 
 // Re-export all top-level types from `cosmic-text` for convenience.
