@@ -1,7 +1,8 @@
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
 use criterion::{criterion_group, criterion_main, Criterion};
 use glyphon::{
-    Cache, ColorMode, Resolution, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Cache, ColorMode, Config, PositionMapping, Resolution, TextArea, TextAtlas, TextBounds,
+    TextRenderer, TextRenderer2Builder, Viewport, Weight,
 };
 use wgpu::{MultisampleState, TextureFormat};
 
@@ -9,7 +10,11 @@ mod state;
 
 fn run_bench(ctx: &mut Criterion) {
     let mut group = ctx.benchmark_group("Prepare");
-    group.noise_threshold(0.02);
+    group
+        .noise_threshold(0.02)
+        .sample_size(10)
+        .warm_up_time(std::time::Duration::from_millis(100))
+        .measurement_time(std::time::Duration::from_millis(100));
 
     let state = state::State::new();
 
@@ -25,8 +30,10 @@ fn run_bench(ctx: &mut Criterion) {
         TextureFormat::Bgra8Unorm,
         ColorMode::Web,
     );
-    let mut text_renderer =
-        TextRenderer::new(&mut atlas, &state.device, MultisampleState::default(), None);
+    let mut text_renderer = TextRenderer2Builder::new(&mut atlas, &state.device)
+        .with_multisample(MultisampleState::default())
+        .with_position_mapping(PositionMapping::Pixel)
+        .build();
 
     let attrs = Attrs::new()
         .family(Family::SansSerif)
@@ -38,6 +45,8 @@ fn run_bench(ctx: &mut Criterion) {
             width: 1000,
             height: 1000,
         },
+        [0, 0],
+        1.0,
     );
 
     for (test_name, text_areas) in &[
@@ -76,41 +85,42 @@ fn run_bench(ctx: &mut Criterion) {
             })
             .collect();
 
+        let text_areas: Vec<TextArea> = buffers
+            .iter()
+            .map(|b| TextArea {
+                buffer: b,
+                left: 0.01,
+                top: 0.01,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 1000,
+                },
+                default_color: Color::rgb(0, 0, 0),
+                custom_glyphs: &[],
+            })
+            .collect();
+        let renderable_text_areas = text_renderer
+            .prepare_text_areas(
+                &state.device,
+                &state.queue,
+                &mut font_system,
+                &mut atlas,
+                &viewport,
+                text_areas,
+                &mut swash_cache,
+            )
+            .unwrap();
+
         group.bench_function(*test_name, |b| {
             b.iter(|| {
-                let text_areas: Vec<TextArea> = buffers
-                    .iter()
-                    .map(|b| TextArea {
-                        buffer: b,
-                        left: 0.0,
-                        top: 0.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: 0,
-                            right: 0,
-                            bottom: 1000,
-                        },
-                        default_color: Color::rgb(0, 0, 0),
-                        custom_glyphs: &[],
-                    })
-                    .collect();
-
-                criterion::black_box(
-                    text_renderer
-                        .prepare(
-                            &state.device,
-                            &state.queue,
-                            &mut font_system,
-                            &mut atlas,
-                            &viewport,
-                            text_areas,
-                            &mut swash_cache,
-                        )
-                        .unwrap(),
-                );
-
-                atlas.trim();
+                criterion::black_box(text_renderer.prepare_renderable_text_areas(
+                    &state.device,
+                    &state.queue,
+                    &renderable_text_areas,
+                ));
             })
         });
     }

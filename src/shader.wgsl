@@ -17,7 +17,9 @@ struct VertexOutput {
 
 struct Params {
     screen_resolution: vec2<u32>,
-    _pad: vec2<u32>,
+    translation: vec2<i32>,
+    scale: f32,
+    _pad: u32,
 };
 
 @group(0) @binding(0)
@@ -49,20 +51,28 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     var uv = vec2<u32>(in_vert.uv & 0xffffu, (in_vert.uv & 0xffff0000u) >> 16u);
     let v = in_vert.vertex_idx;
 
+    // Cheap way to determine the corner position of the quad:
+    //  (0, 0) -> Bottom-left corner
+    //  (1, 0) -> Bottom-right corner
+    //  (0, 1) -> Top-left corner
+    //  (1, 1) -> Top-right corner
     let corner_position = vec2<u32>(
         in_vert.vertex_idx & 1u,
         (in_vert.vertex_idx >> 1u) & 1u,
     );
 
+    // Translates width and height by where this position should corresond to (bottom-right, top-left, ...).
     let corner_offset = vec2<u32>(width, height) * corner_position;
 
+    // Ensure UV and position is in the correct corner for this vertex.
     uv = uv + corner_offset;
-    pos = pos + vec2<i32>(corner_offset);
+    pos = pos + vec2<i32>(corner_offset) + params.translation;
 
     var vert_output: VertexOutput;
 
     vert_output.position = vec4<f32>(
-        2.0 * vec2<f32>(pos) / vec2<f32>(params.screen_resolution) - 1.0,
+        // Convert to NDC
+        2.0 * vec2<f32>(pos) * vec2<f32>(params.scale, params.scale) / vec2<f32>(params.screen_resolution) - 1.0,
         in_vert.depth,
         1.0,
     );

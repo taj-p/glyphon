@@ -14,11 +14,13 @@ use wgpu::{
     COPY_BUFFER_ALIGNMENT,
 };
 
+#[derive(Debug)]
 pub struct RenderableTextArea {
     pub(crate) layout_glyphs: Vec<LayoutGlyphs>,
     pub(crate) custom_glyphs: Vec<GlyphToRender>,
 }
 
+#[derive(Debug)]
 pub(crate) struct LayoutGlyphs {
     bounds: TextBounds,
     glyphs: Vec<GlyphToRender>,

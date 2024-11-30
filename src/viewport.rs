@@ -23,7 +23,9 @@ impl Viewport {
                 width: 0,
                 height: 0,
             },
-            _pad: [0, 0],
+            translation: [0, 0],
+            scale: 1.0,
+            _padding: 0,
         };
 
         let params_buffer = device.create_buffer(&BufferDescriptor {
@@ -43,9 +45,20 @@ impl Viewport {
     }
 
     /// Updates the `Viewport` with the given `resolution`.
-    pub fn update(&mut self, queue: &Queue, resolution: Resolution) {
-        if self.params.screen_resolution != resolution {
+    pub fn update(
+        &mut self,
+        queue: &Queue,
+        resolution: Resolution,
+        translation: [i32; 2],
+        scale: f32,
+    ) {
+        if self.params.screen_resolution != resolution
+            || self.params.translation != translation
+            || self.params.scale != scale
+        {
             self.params.screen_resolution = resolution;
+            self.params.translation = translation;
+            self.params.scale = scale;
 
             queue.write_buffer(&self.params_buffer, 0, unsafe {
                 slice::from_raw_parts(

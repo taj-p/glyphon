@@ -1,7 +1,7 @@
 use glyphon::{
     Attrs, Buffer, Cache, Color, ColorMode, Config, Family, FontSystem, Metrics, PositionMapping,
-    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, TextRenderer2,
-    TextRenderer2Builder, Viewport, Weight,
+    RenderableTextArea, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
+    TextRenderer, TextRenderer2, TextRenderer2Builder, Viewport, Weight,
 };
 use std::{sync::Arc, time::Instant};
 use wgpu::{
@@ -164,7 +164,8 @@ fn main() {
     event_loop
         .run_app(&mut Application {
             window_state: None,
-            offset: 0.0,
+            offset: 0,
+            scale: 1.0,
             start_time: Instant::now(),
         })
         .unwrap();
@@ -184,6 +185,7 @@ struct WindowState {
     atlas: glyphon::TextAtlas,
     text_renderer: glyphon::TextRenderer2,
     buffers: Vec<glyphon::Buffer>,
+    renderable_text_areas: Vec<RenderableTextArea>,
 
     // Make sure that the winit window is last in the struct so that
     // it is dropped after the wgpu surface is dropped, otherwise the
@@ -232,12 +234,21 @@ impl WindowState {
 
         // Set up text renderer
         let mut font_system = FontSystem::new();
-        let swash_cache = SwashCache::new();
+        let mut swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
+        let mut viewport = Viewport::new(&device, &cache);
+        viewport.update(
+            &queue,
+            Resolution {
+                width: surface_config.width,
+                height: surface_config.height,
+            },
+            [0, 0],
+            1.0,
+        );
         let mut atlas =
             TextAtlas::with_color_mode(&device, &queue, &cache, swapchain_format, color_mode);
-        let text_renderer = TextRenderer2Builder::new(&mut atlas, &device)
+        let mut text_renderer = TextRenderer2Builder::new(&mut atlas, &device)
             .with_multisample(MultisampleState::default())
             .with_position_mapping(PositionMapping::Pixel)
             .build();
@@ -245,7 +256,7 @@ impl WindowState {
         let attrs = Attrs::new().family(Family::SansSerif).weight(WEIGHT);
         let shaping = Shaping::Advanced;
 
-        let buffers: Vec<glyphon::Buffer> = SIZES_2
+        let buffers: Vec<glyphon::Buffer> = SIZES
             .iter()
             .copied()
             .map(|s| {
@@ -267,6 +278,50 @@ impl WindowState {
             })
             .collect();
 
+        let left = 10.0 * scale_factor + 0.0001;
+        let mut top = 10.0 * scale_factor + 0.0001;
+
+        let bounds_left = left.floor() as i32;
+        let bounds_right = physical_size.width - 10;
+
+        let text_areas: Vec<TextArea> = buffers
+            .iter()
+            .map(|b| {
+                let a = TextArea {
+                    buffer: b,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bounds_left,
+                        top: top.floor() as i32,
+                        right: bounds_right as i32,
+                        bottom: top.floor() as i32 + physical_size.height as i32,
+                    },
+                    default_color: FONT_COLOR,
+                    custom_glyphs: &[],
+                };
+
+                top += 1.0;
+
+                a
+            })
+            .collect();
+
+        let renderable_text_areas = text_renderer
+            .prepare_text_areas(
+                &device,
+                &queue,
+                &mut font_system,
+                &mut atlas,
+                &viewport,
+                text_areas,
+                &mut swash_cache,
+            )
+            .unwrap();
+
+        text_renderer.prepare_renderable_text_areas(&device, &queue, &renderable_text_areas);
+
         Self {
             device,
             queue,
@@ -279,6 +334,7 @@ impl WindowState {
             viewport,
             atlas,
             text_renderer,
+            renderable_text_areas,
             buffers,
             window,
         }
@@ -287,7 +343,8 @@ impl WindowState {
 
 struct Application {
     window_state: Option<WindowState>,
-    offset: f32,
+    offset: i32,
+    scale: f32,
     start_time: Instant,
 }
 
@@ -331,6 +388,7 @@ impl winit::application::ApplicationHandler for Application {
             buffers,
             scale_factor,
             physical_size,
+            renderable_text_areas,
             ..
         } = state;
 
@@ -352,7 +410,6 @@ impl winit::application::ApplicationHandler for Application {
                 }
             }
             WindowEvent::RedrawRequested => {
-                println!("Frame time: {:?}", self.start_time.elapsed());
                 self.start_time = Instant::now();
                 viewport.update(
                     &queue,
@@ -360,54 +417,9 @@ impl winit::application::ApplicationHandler for Application {
                         width: surface_config.width,
                         height: surface_config.height,
                     },
+                    [self.offset, 0],
+                    self.scale,
                 );
-
-                let scale_factor = *scale_factor;
-
-                let left = 10.0 * scale_factor + self.offset + 0.0001;
-                let mut top = 10.0 * scale_factor + 0.0001;
-
-                let bounds_left = left.floor() as i32;
-                let bounds_right = physical_size.width - 10;
-
-                let text_areas: Vec<TextArea> = buffers
-                    .iter()
-                    .map(|b| {
-                        let a = TextArea {
-                            buffer: b,
-                            left,
-                            top,
-                            scale: scale_factor,
-                            bounds: TextBounds {
-                                left: bounds_left,
-                                top: top.floor() as i32,
-                                right: bounds_right,
-                                bottom: top.floor() as i32 + physical_size.height,
-                            },
-                            default_color: FONT_COLOR,
-                            custom_glyphs: &[],
-                        };
-
-                        top += 1.0;
-
-                        a
-                    })
-                    .collect();
-
-                let prepare_time = Instant::now();
-                let renderable_text_areas = text_renderer
-                    .prepare_text_areas(
-                        device,
-                        queue,
-                        font_system,
-                        atlas,
-                        viewport,
-                        text_areas,
-                        swash_cache,
-                    )
-                    .unwrap();
-                text_renderer.prepare_renderable_text_areas(device, queue, &renderable_text_areas);
-                println!("Prepare time: {:?}", prepare_time.elapsed());
 
                 let frame = surface.get_current_texture().unwrap();
                 let view = frame.texture.create_view(&TextureViewDescriptor::default());
@@ -435,11 +447,14 @@ impl winit::application::ApplicationHandler for Application {
                 queue.submit(Some(encoder.finish()));
                 frame.present();
 
-                atlas.trim();
-                self.offset += 0.05;
+                // self.offset += 1;
+                if self.offset > 100 {
+                    self.offset = 0;
+                }
 
-                if self.offset > 100.0 {
-                    self.offset = 0.0;
+                self.scale += 0.01;
+                if self.scale > 2.0 {
+                    self.scale = 0.1;
                 }
                 window.request_redraw();
             }
