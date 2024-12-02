@@ -149,9 +149,7 @@ const SIZES: [f32; 2048] = [
     8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0, 48.0,
     8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0, 48.0,
 ];
-const SIZES_2: [f32; 16] = [
-    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0, 48.0,
-];
+const SIZES_2: [f32; 2] = [48.0, 48.0];
 const LINE_HEIGHT: f32 = 1.15;
 const BG_COLOR: wgpu::Color = wgpu::Color::WHITE;
 const FONT_COLOR: Color = Color::rgb(0, 0, 0);
@@ -249,14 +247,14 @@ impl WindowState {
         let mut atlas =
             TextAtlas::with_color_mode(&device, &queue, &cache, swapchain_format, color_mode);
         let mut text_renderer = TextRenderer2Builder::new(&mut atlas, &device)
-            .with_multisample(MultisampleState::default())
             .with_position_mapping(PositionMapping::Pixel)
             .build();
 
         let attrs = Attrs::new().family(Family::SansSerif).weight(WEIGHT);
         let shaping = Shaping::Advanced;
 
-        let buffers: Vec<glyphon::Buffer> = SIZES
+        let now = Instant::now();
+        let buffers: Vec<glyphon::Buffer> = SIZES_2
             .iter()
             .copied()
             .map(|s| {
@@ -278,8 +276,10 @@ impl WindowState {
             })
             .collect();
 
-        let left = 10.0 * scale_factor + 0.0001;
-        let mut top = 10.0 * scale_factor + 0.0001;
+        println!("buffer creation time: {:?}", now.elapsed());
+
+        let left = 10.0 * scale_factor + 0.0001 + 100.0;
+        let mut top = 10.0 * scale_factor + 0.0001 + 500.0;
 
         let bounds_left = left.floor() as i32;
         let bounds_right = physical_size.width - 10;
@@ -302,11 +302,13 @@ impl WindowState {
                     custom_glyphs: &[],
                 };
 
-                top += 1.0;
+                top += 100.0;
 
                 a
             })
             .collect();
+
+        println!("text area creation time: {:?}", now.elapsed());
 
         let renderable_text_areas = text_renderer
             .prepare_text_areas(
@@ -320,7 +322,11 @@ impl WindowState {
             )
             .unwrap();
 
+        println!("renderable text area creation time: {:?}", now.elapsed());
+
         text_renderer.prepare_renderable_text_areas(&device, &queue, &renderable_text_areas);
+
+        println!("renderable text area preparation time: {:?}", now.elapsed());
 
         Self {
             device,
@@ -452,7 +458,7 @@ impl winit::application::ApplicationHandler for Application {
                     self.offset = 0;
                 }
 
-                self.scale += 0.01;
+                self.scale += 0.0001;
                 if self.scale > 2.0 {
                     self.scale = 0.1;
                 }

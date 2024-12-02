@@ -6,8 +6,15 @@ use crate::{
     RasterizeCustomGlyphRequest, RasterizedCustomGlyph, RenderError, SwashCache, SwashContent,
     TextArea, TextAtlas, TextBounds, Viewport,
 };
-use cosmic_text::{Color, LayoutGlyph, PhysicalGlyph, SubpixelBin};
+use cosmic_text::{
+    CacheKey, CacheKeyFlags, Color, LayoutGlyph, PhysicalGlyph, SubpixelBin, SwashImage,
+};
 use std::{slice, sync::Arc};
+use swash::zeno::{Angle, Command, Placement, Transform};
+use swash::{
+    scale::{Render, ScaleContext, Source, StrikeWith},
+    zeno::{Format, Vector},
+};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d, ImageCopyTexture,
     ImageDataLayout, MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline, TextureAspect,
@@ -359,8 +366,12 @@ impl TextRenderer2 {
                          font_system,
                          _rasterize_custom_glyph|
                          -> Option<GetGlyphImageResult> {
-                            let image =
-                                cache.get_image_uncached(font_system, physical_glyph.cache_key)?;
+                            let image = swash_image(
+                                font_system,
+                                &mut ScaleContext::new(),
+                                physical_glyph.cache_key,
+                            )
+                            .unwrap();
 
                             let content_type = match image.content {
                                 SwashContent::Color => ContentType::Color,
@@ -586,6 +597,7 @@ where
         inner.glyph_cache.entry(cache_key).or_insert(GlyphDetails {
             width: image.width,
             height: image.height,
+            frequency: 1,
             gpu_cache,
             atlas_id,
             top: image.top,
@@ -660,4 +672,53 @@ where
         ],
         depth,
     }))
+}
+
+fn swash_image(
+    font_system: &mut FontSystem,
+    context: &mut ScaleContext,
+    cache_key: CacheKey,
+) -> Option<SwashImage> {
+    let font = match font_system.get_font(cache_key.font_id) {
+        Some(some) => some,
+        None => {
+            return None;
+        }
+    };
+
+    // Build the scaler
+    let mut scaler = context
+        .builder(font.as_swash())
+        .size(f32::from_bits(cache_key.font_size_bits))
+        .hint(true)
+        .build();
+
+    // Compute the fractional offset-- you'll likely want to quantize this
+    // in a real renderer
+    let offset = Vector::new(cache_key.x_bin.as_float(), cache_key.y_bin.as_float());
+
+    // Select our source order
+    Render::new(&[
+        // Color outline with the first palette
+        Source::ColorOutline(0),
+        // Color bitmap with best fit selection mode
+        Source::ColorBitmap(StrikeWith::BestFit),
+        // Standard scalable outline
+        Source::Outline,
+    ])
+    // Select a subpixel format
+    .format(Format::Alpha)
+    // Apply the fractional offset
+    .offset(offset)
+    // .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
+    //     Some(Transform::skew(
+    //         Angle::from_degrees(14.0),
+    //         Angle::from_degrees(0.0),
+    //     ))
+    // } else {
+    //     None
+    // })
+    // .transform(Some(Transform::rotation(Angle::from_degrees(28.0))))
+    // Render the image
+    .render(&mut scaler, cache_key.glyph_id)
 }

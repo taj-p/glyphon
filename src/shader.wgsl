@@ -52,10 +52,6 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     let v = in_vert.vertex_idx;
 
     // Cheap way to determine the corner position of the quad:
-    //  (0, 0) -> Bottom-left corner
-    //  (1, 0) -> Bottom-right corner
-    //  (0, 1) -> Top-left corner
-    //  (1, 1) -> Top-right corner
     let corner_position = vec2<u32>(
         in_vert.vertex_idx & 1u,
         (in_vert.vertex_idx >> 1u) & 1u,
@@ -68,11 +64,28 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     uv = uv + corner_offset;
     pos = pos + vec2<i32>(corner_offset) + params.translation;
 
+    // Rotation angle (0 degrees to radians)
+    let angle_deg = 0.0;
+    let angle_rad = angle_deg * 3.14159 / 180.0;  // Convert degrees to radians
+    
+    // Rotation matrix components
+    let cos_theta = cos(angle_rad);
+    let sin_theta = sin(angle_rad);
+
+    // Create the 2D rotation matrix
+    let rotation_matrix = mat2x2<f32>(
+        cos_theta, -sin_theta,
+        sin_theta, cos_theta
+    );
+
+    // Rotate the position
+    let rotated_pos = rotation_matrix * vec2<f32>(pos);
+
     var vert_output: VertexOutput;
 
     vert_output.position = vec4<f32>(
-        // Convert to NDC
-        2.0 * vec2<f32>(pos) * vec2<f32>(params.scale, params.scale) / vec2<f32>(params.screen_resolution) - 1.0,
+        // Convert to NDC after rotation
+        2.0 * rotated_pos * vec2<f32>(params.scale, params.scale) / vec2<f32>(params.screen_resolution) - 1.0,
         in_vert.depth,
         1.0,
     );

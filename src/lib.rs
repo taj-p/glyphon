@@ -48,6 +48,7 @@ pub(crate) struct GlyphDetails {
     height: u16,
     gpu_cache: GpuCacheStatus,
     atlas_id: Option<AllocId>,
+    frequency: u32,
     top: i16,
     left: i16,
 }

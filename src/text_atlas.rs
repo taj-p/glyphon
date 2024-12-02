@@ -4,7 +4,11 @@ use crate::{
 };
 use etagere::{size2, Allocation, BucketedAtlasAllocator};
 use rustc_hash::FxHasher;
-use std::{collections::HashMap, hash::BuildHasherDefault, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::BuildHasherDefault,
+    sync::Arc,
+};
 use wgpu::{
     BindGroup, DepthStencilState, Device, Extent3d, ImageCopyTexture, ImageDataLayout,
     MultisampleState, Origin3d, Queue, RenderPipeline, Texture, TextureAspect, TextureDescriptor,

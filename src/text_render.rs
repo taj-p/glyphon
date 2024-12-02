@@ -3,7 +3,7 @@ use crate::{
     GlyphToRender, GpuCacheStatus, PrepareError, RasterizeCustomGlyphRequest,
     RasterizedCustomGlyph, RenderError, SwashCache, SwashContent, TextArea, TextAtlas, Viewport,
 };
-use cosmic_text::{Color, SubpixelBin};
+use cosmic_text::{Color, LayoutGlyph, PhysicalGlyph, SubpixelBin};
 use std::{slice, sync::Arc};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d, ImageCopyTexture,
@@ -17,6 +17,19 @@ pub struct TextRenderer {
     vertex_buffer_size: u64,
     pipeline: Arc<RenderPipeline>,
     glyph_vertices: Vec<GlyphToRender>,
+    config: Config,
+}
+
+pub struct Config {
+    pub subpixel_rendering: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            subpixel_rendering: true,
+        }
+    }
 }
 
 impl TextRenderer {
@@ -26,6 +39,7 @@ impl TextRenderer {
         device: &Device,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
+        config: Option<Config>,
     ) -> Self {
         let vertex_buffer_size = next_copy_buffer_size(4096);
         let vertex_buffer = device.create_buffer(&BufferDescriptor {
@@ -42,6 +56,7 @@ impl TextRenderer {
             vertex_buffer_size,
             pipeline,
             glyph_vertices: Vec::new(),
+            config: config.unwrap_or_default(),
         }
     }
 
@@ -150,18 +165,19 @@ impl TextRenderer {
                 let width = (glyph.width * text_area.scale).round() as u16;
                 let height = (glyph.height * text_area.scale).round() as u16;
 
-                let (x, y, x_bin, y_bin) = if glyph.snap_to_physical_pixel {
-                    (
-                        x.round() as i32,
-                        y.round() as i32,
-                        SubpixelBin::Zero,
-                        SubpixelBin::Zero,
-                    )
-                } else {
-                    let (x, x_bin) = SubpixelBin::new(x);
-                    let (y, y_bin) = SubpixelBin::new(y);
-                    (x, y, x_bin, y_bin)
-                };
+                let (x, y, x_bin, y_bin) =
+                    if !self.config.subpixel_rendering || glyph.snap_to_physical_pixel {
+                        (
+                            x.round() as i32,
+                            y.round() as i32,
+                            SubpixelBin::Zero,
+                            SubpixelBin::Zero,
+                        )
+                    } else {
+                        let (x, x_bin) = SubpixelBin::new(x);
+                        let (y, y_bin) = SubpixelBin::new(y);
+                        (x, y, x_bin, y_bin)
+                    };
 
                 let cache_key = GlyphonCacheKey::Custom(CustomGlyphCacheKey {
                     glyph_id: glyph.id,
@@ -239,8 +255,7 @@ impl TextRenderer {
 
             for run in layout_runs {
                 for glyph in run.glyphs.iter() {
-                    let physical_glyph =
-                        glyph.physical((text_area.left, text_area.top), text_area.scale);
+                    let physical_glyph = self.physical_glyph(glyph, &text_area);
 
                     let color = match glyph.color_opt {
                         Some(some) => some,
@@ -349,6 +364,34 @@ impl TextRenderer {
 
         Ok(())
     }
+
+    fn physical_glyph(&self, glyph: &LayoutGlyph, text_area: &TextArea) -> PhysicalGlyph {
+        let scale = text_area.scale;
+        let offset = (text_area.left, text_area.top);
+
+        if self.config.subpixel_rendering {
+            glyph.physical(offset, scale)
+        } else {
+            // Fast path for non subpixel rendering.
+            // Avoids calculating the `SubpixelBin`.
+            let x_offset = glyph.font_size * glyph.x_offset;
+            let y_offset = glyph.font_size * glyph.y_offset;
+
+            let x = ((glyph.x + x_offset) * scale + offset.0) as i32;
+            let y = ((glyph.y - y_offset) * scale + offset.1) as i32;
+
+            let cache_key = cosmic_text::CacheKey {
+                font_id: glyph.font_id,
+                glyph_id: glyph.glyph_id,
+                font_size_bits: (glyph.font_size * scale).to_bits(),
+                x_bin: SubpixelBin::Zero,
+                y_bin: SubpixelBin::Zero,
+                flags: glyph.cache_key_flags,
+            };
+
+            PhysicalGlyph { cache_key, x, y }
+        }
+    }
 }
 
 #[repr(u16)]
@@ -428,16 +471,15 @@ fn prepare_glyph<R>(
 where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
-    let details = if let Some(details) = atlas.mask_atlas.glyph_cache.get(&cache_key) {
-        atlas.mask_atlas.glyphs_in_use.insert(cache_key);
+    let details = if let Some(details) = atlas.mask_atlas.glyph_cache.get_mut(&cache_key) {
         details
-    } else if let Some(details) = atlas.color_atlas.glyph_cache.get(&cache_key) {
-        atlas.color_atlas.glyphs_in_use.insert(cache_key);
+    } else if let Some(details) = atlas.color_atlas.glyph_cache.get_mut(&cache_key) {
         details
     } else {
         let Some(image) = (get_glyph_image)(cache, font_system, &mut rasterize_custom_glyph) else {
             return Ok(None);
         };
+        println!("Rasterising glyph");
 
         let should_rasterize = image.width > 0 && image.height > 0;
 
@@ -505,13 +547,12 @@ where
             (GpuCacheStatus::SkipRasterization, None, inner)
         };
 
-        inner.glyphs_in_use.insert(cache_key);
-        // Insert the glyph into the cache and return the details reference
-        inner.glyph_cache.get_or_insert(cache_key, || GlyphDetails {
+        inner.glyph_cache.entry(cache_key).or_insert(GlyphDetails {
             width: image.width,
             height: image.height,
             gpu_cache,
             atlas_id,
+            frequency: 1,
             top: image.top,
             left: image.left,
         })
