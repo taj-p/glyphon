@@ -1,45 +1,107 @@
+//! Defines the types used to render text.
+//!
 use crate::{
-    custom_glyph::CustomGlyphCacheKey, ColorMode, ContentType, FontSystem, GlyphDetails,
-    GlyphToRender, GpuCacheStatus, PrepareError, RasterizeCustomGlyphRequest,
-    RasterizedCustomGlyph, RenderError, SwashCache, SwashContent, TextArea, TextAtlas, Viewport,
+    custom_glyph::CustomGlyphCacheKey, text_render::GlyphonCacheKey, ColorMode, ContentType,
+    FontSystem, GlyphDetails, GlyphToRender, GpuCacheStatus, PrepareError,
+    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, RenderError, SwashCache, SwashContent,
+    TextArea, TextAtlas, TextBounds, Viewport,
 };
-use cosmic_text::{Color, LayoutGlyph, PhysicalGlyph, SubpixelBin};
+use cosmic_text::{
+    CacheKey, CacheKeyFlags, Color, LayoutGlyph, PhysicalGlyph, SubpixelBin, SwashImage,
+};
 use std::{slice, sync::Arc};
+use swash::zeno::{Angle, Command, Placement, Transform};
+use swash::{
+    scale::{Render, ScaleContext, Source, StrikeWith},
+    zeno::{Format, Vector},
+};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, DepthStencilState, Device, Extent3d, ImageCopyTexture,
     ImageDataLayout, MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline, TextureAspect,
     COPY_BUFFER_ALIGNMENT,
 };
 
+#[derive(Debug)]
+pub struct RenderableTextArea {
+    pub(crate) layout_glyphs: Vec<LayoutGlyphs>,
+    pub(crate) custom_glyphs: Vec<GlyphToRender>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LayoutGlyphs {
+    bounds: TextBounds,
+    glyphs: Vec<GlyphToRender>,
+}
+
 /// A text renderer that uses cached glyphs to render text into an existing render pass.
-pub struct TextRenderer {
+pub struct TextRenderer2 {
     vertex_buffer: Buffer,
     vertex_buffer_size: u64,
+    glyph_vertices_len: usize,
     pipeline: Arc<RenderPipeline>,
-    glyph_vertices: Vec<GlyphToRender>,
-    config: Config,
+    position_mapping: PositionMapping,
 }
 
-pub struct Config {
-    pub subpixel_rendering: bool,
+pub struct TextRenderer2Builder<'a> {
+    atlas: &'a mut TextAtlas,
+    device: &'a Device,
+    multisample: MultisampleState,
+    depth_stencil: Option<DepthStencilState>,
+    position_mapping: PositionMapping,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl<'a> TextRenderer2Builder<'a> {
+    pub fn new(atlas: &'a mut TextAtlas, device: &'a Device) -> Self {
         Self {
-            subpixel_rendering: true,
+            atlas,
+            device,
+            multisample: MultisampleState::default(),
+            depth_stencil: None,
+            position_mapping: PositionMapping::Subpixel,
         }
+    }
+
+    pub fn with_multisample(&mut self, multisample: MultisampleState) -> &mut Self {
+        self.multisample = multisample;
+        self
+    }
+
+    pub fn with_depth_stencil(&mut self, depth_stencil: DepthStencilState) -> &mut Self {
+        self.depth_stencil = Some(depth_stencil);
+        self
+    }
+
+    // TODO: Move to preparer
+    pub fn with_position_mapping(&mut self, position_mapping: PositionMapping) -> &mut Self {
+        self.position_mapping = position_mapping;
+        self
+    }
+
+    pub fn build(&mut self) -> TextRenderer2 {
+        TextRenderer2::new(
+            self.atlas,
+            self.device,
+            self.multisample,
+            self.depth_stencil.clone(),
+            self.position_mapping.clone(),
+        )
     }
 }
 
-impl TextRenderer {
+#[derive(Debug, Clone)]
+pub enum PositionMapping {
+    Subpixel,
+    Pixel,
+}
+
+impl TextRenderer2 {
     /// Creates a new `TextRenderer`.
-    pub fn new(
+    fn new(
         atlas: &mut TextAtlas,
         device: &Device,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
-        config: Option<Config>,
+        position_mapping: PositionMapping,
     ) -> Self {
         let vertex_buffer_size = next_copy_buffer_size(4096);
         let vertex_buffer = device.create_buffer(&BufferDescriptor {
@@ -54,14 +116,13 @@ impl TextRenderer {
         Self {
             vertex_buffer,
             vertex_buffer_size,
+            glyph_vertices_len: 0,
             pipeline,
-            glyph_vertices: Vec::new(),
-            config: config.unwrap_or_default(),
+            position_mapping,
         }
     }
 
-    /// Prepares all of the provided text areas for rendering.
-    pub fn prepare<'a>(
+    pub fn prepare_text_areas<'a>(
         &mut self,
         device: &Device,
         queue: &Queue,
@@ -70,8 +131,13 @@ impl TextRenderer {
         viewport: &Viewport,
         text_areas: impl IntoIterator<Item = TextArea<'a>>,
         cache: &mut SwashCache,
-    ) -> Result<(), PrepareError> {
-        self.prepare_with_depth_and_custom(
+        //TODO: Fix
+        // metadata_to_depth: Option<impl FnMut(usize) -> f32>,
+        // rasterize_custom_glyph: Option<
+        //     impl FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
+        // >,
+    ) -> Result<Vec<RenderableTextArea>, PrepareError> {
+        self.prepare_text_areas_with_depth_and_custom(
             device,
             queue,
             font_system,
@@ -79,63 +145,80 @@ impl TextRenderer {
             viewport,
             text_areas,
             cache,
+            // TODO: Fix
             zero_depth,
             |_| None,
         )
     }
 
-    /// Prepares all of the provided text areas for rendering.
-    pub fn prepare_with_depth<'a>(
+    pub fn prepare_renderable_text_areas(
         &mut self,
         device: &Device,
         queue: &Queue,
-        font_system: &mut FontSystem,
-        atlas: &mut TextAtlas,
-        viewport: &Viewport,
-        text_areas: impl IntoIterator<Item = TextArea<'a>>,
-        cache: &mut SwashCache,
-        metadata_to_depth: impl FnMut(usize) -> f32,
-    ) -> Result<(), PrepareError> {
-        self.prepare_with_depth_and_custom(
-            device,
-            queue,
-            font_system,
-            atlas,
-            viewport,
-            text_areas,
-            cache,
-            metadata_to_depth,
-            |_| None,
-        )
+        renderable_text_areas: &[RenderableTextArea],
+    ) {
+        // TODO: Consider culling
+
+        let glyph_vertices = renderable_text_areas
+            .iter()
+            .flat_map(|renderable_text_area| {
+                renderable_text_area
+                    .layout_glyphs
+                    .iter()
+                    .flat_map(|layout_glyphs| {
+                        layout_glyphs
+                            .glyphs
+                            .iter()
+                            .chain(renderable_text_area.custom_glyphs.iter())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        self.glyph_vertices_len = glyph_vertices.len();
+
+        let vertices = glyph_vertices.as_slice();
+
+        let vertices_raw = unsafe {
+            slice::from_raw_parts(
+                vertices as *const _ as *const u8,
+                std::mem::size_of_val(vertices),
+            )
+        };
+
+        if self.vertex_buffer_size >= vertices_raw.len() as u64 {
+            queue.write_buffer(&self.vertex_buffer, 0, vertices_raw);
+        } else {
+            self.vertex_buffer.destroy();
+
+            let (buffer, buffer_size) = create_oversized_buffer(
+                device,
+                Some("glyphon vertices"),
+                vertices_raw,
+                BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            );
+
+            self.vertex_buffer = buffer;
+            self.vertex_buffer_size = buffer_size;
+        }
     }
 
-    /// Prepares all of the provided text areas for rendering.
-    pub fn prepare_with_custom<'a>(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        font_system: &mut FontSystem,
-        atlas: &mut TextAtlas,
+    pub fn render(
+        &self,
+        atlas: &TextAtlas,
         viewport: &Viewport,
-        text_areas: impl IntoIterator<Item = TextArea<'a>>,
-        cache: &mut SwashCache,
-        rasterize_custom_glyph: impl FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
-    ) -> Result<(), PrepareError> {
-        self.prepare_with_depth_and_custom(
-            device,
-            queue,
-            font_system,
-            atlas,
-            viewport,
-            text_areas,
-            cache,
-            zero_depth,
-            rasterize_custom_glyph,
-        )
+        pass: &mut RenderPass<'_>,
+    ) -> Result<(), RenderError> {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &atlas.bind_group, &[]);
+        pass.set_bind_group(1, &viewport.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..4, 0..self.glyph_vertices_len as u32);
+
+        Ok(())
     }
 
-    /// Prepares all of the provided text areas for rendering.
-    pub fn prepare_with_depth_and_custom<'a>(
+    fn prepare_text_areas_with_depth_and_custom<'a>(
         &mut self,
         device: &Device,
         queue: &Queue,
@@ -148,16 +231,22 @@ impl TextRenderer {
         mut rasterize_custom_glyph: impl FnMut(
             RasterizeCustomGlyphRequest,
         ) -> Option<RasterizedCustomGlyph>,
-    ) -> Result<(), PrepareError> {
-        self.glyph_vertices.clear();
-
-        let resolution = viewport.resolution();
+    ) -> Result<Vec<RenderableTextArea>, PrepareError> {
+        let mut renderable_text_areas = Vec::new();
 
         for text_area in text_areas {
             let bounds_min_x = text_area.bounds.left.max(0);
             let bounds_min_y = text_area.bounds.top.max(0);
-            let bounds_max_x = text_area.bounds.right.min(resolution.width as i32);
-            let bounds_max_y = text_area.bounds.bottom.min(resolution.height as i32);
+            let bounds_max_x = text_area
+                .bounds
+                .right
+                .min(viewport.resolution().width as i32);
+            let bounds_max_y = text_area
+                .bounds
+                .bottom
+                .min(viewport.resolution().height as i32);
+
+            let mut custom_glyph_vertices = Vec::with_capacity(text_area.custom_glyphs.len());
 
             for glyph in text_area.custom_glyphs.iter() {
                 let x = text_area.left + (glyph.left * text_area.scale);
@@ -166,7 +255,9 @@ impl TextRenderer {
                 let height = (glyph.height * text_area.scale).round() as u16;
 
                 let (x, y, x_bin, y_bin) =
-                    if !self.config.subpixel_rendering || glyph.snap_to_physical_pixel {
+                    if matches!(self.position_mapping, PositionMapping::Pixel)
+                        || glyph.snap_to_physical_pixel
+                    {
                         (
                             x.round() as i32,
                             y.round() as i32,
@@ -236,24 +327,16 @@ impl TextRenderer {
                     &mut metadata_to_depth,
                     &mut rasterize_custom_glyph,
                 )? {
-                    self.glyph_vertices.push(glyph_to_render);
+                    custom_glyph_vertices.push(glyph_to_render);
                 }
             }
 
-            let is_run_visible = |run: &cosmic_text::LayoutRun| {
-                let start_y = (text_area.top + run.line_top) as i32;
-                let end_y = (text_area.top + run.line_top + run.line_height) as i32;
+            let layout_runs = text_area.buffer.layout_runs();
 
-                start_y <= bounds_max_y && bounds_min_y <= end_y
-            };
-
-            let layout_runs = text_area
-                .buffer
-                .layout_runs()
-                .skip_while(|run| !is_run_visible(run))
-                .take_while(is_run_visible);
+            let mut layout_glyphs = Vec::new();
 
             for run in layout_runs {
+                let mut glyph_vertices = Vec::with_capacity(run.glyphs.len());
                 for glyph in run.glyphs.iter() {
                     let physical_glyph = self.physical_glyph(glyph, &text_area);
 
@@ -283,8 +366,12 @@ impl TextRenderer {
                          font_system,
                          _rasterize_custom_glyph|
                          -> Option<GetGlyphImageResult> {
-                            let image =
-                                cache.get_image_uncached(font_system, physical_glyph.cache_key)?;
+                            let image = swash_image(
+                                font_system,
+                                &mut ScaleContext::new(),
+                                physical_glyph.cache_key,
+                            )
+                            .unwrap();
 
                             let content_type = match image.content {
                                 SwashContent::Color => ContentType::Color,
@@ -307,89 +394,56 @@ impl TextRenderer {
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
                     )? {
-                        self.glyph_vertices.push(glyph_to_render);
+                        glyph_vertices.push(glyph_to_render);
                     }
                 }
+
+                layout_glyphs.push(LayoutGlyphs {
+                    bounds: TextBounds {
+                        top: (text_area.top + run.line_top) as i32,
+                        left: text_area.left as i32,
+                        right: (text_area.left + run.line_w) as i32,
+                        bottom: (text_area.top + run.line_top + run.line_height) as i32,
+                    },
+                    glyphs: glyph_vertices,
+                });
             }
+
+            renderable_text_areas.push(RenderableTextArea {
+                layout_glyphs,
+                custom_glyphs: custom_glyph_vertices,
+            });
         }
 
-        let will_render = !self.glyph_vertices.is_empty();
-        if !will_render {
-            return Ok(());
-        }
-
-        let vertices = self.glyph_vertices.as_slice();
-        let vertices_raw = unsafe {
-            slice::from_raw_parts(
-                vertices as *const _ as *const u8,
-                std::mem::size_of_val(vertices),
-            )
-        };
-
-        if self.vertex_buffer_size >= vertices_raw.len() as u64 {
-            queue.write_buffer(&self.vertex_buffer, 0, vertices_raw);
-        } else {
-            self.vertex_buffer.destroy();
-
-            let (buffer, buffer_size) = create_oversized_buffer(
-                device,
-                Some("glyphon vertices"),
-                vertices_raw,
-                BufferUsages::VERTEX | BufferUsages::COPY_DST,
-            );
-
-            self.vertex_buffer = buffer;
-            self.vertex_buffer_size = buffer_size;
-        }
-
-        Ok(())
-    }
-
-    /// Renders all layouts that were previously provided to `prepare`.
-    pub fn render(
-        &self,
-        atlas: &TextAtlas,
-        viewport: &Viewport,
-        pass: &mut RenderPass<'_>,
-    ) -> Result<(), RenderError> {
-        if self.glyph_vertices.is_empty() {
-            return Ok(());
-        }
-
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &atlas.bind_group, &[]);
-        pass.set_bind_group(1, &viewport.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..4, 0..self.glyph_vertices.len() as u32);
-
-        Ok(())
+        Ok(renderable_text_areas)
     }
 
     fn physical_glyph(&self, glyph: &LayoutGlyph, text_area: &TextArea) -> PhysicalGlyph {
         let scale = text_area.scale;
         let offset = (text_area.left, text_area.top);
 
-        if self.config.subpixel_rendering {
-            glyph.physical(offset, scale)
-        } else {
-            // Fast path for non subpixel rendering.
-            // Avoids calculating the `SubpixelBin`.
-            let x_offset = glyph.font_size * glyph.x_offset;
-            let y_offset = glyph.font_size * glyph.y_offset;
+        match self.position_mapping {
+            PositionMapping::Subpixel => glyph.physical(offset, scale),
+            PositionMapping::Pixel => {
+                // Fast path for non subpixel rendering.
+                // Avoids calculating the `SubpixelBin`.
+                let x_offset = glyph.font_size * glyph.x_offset;
+                let y_offset = glyph.font_size * glyph.y_offset;
 
-            let x = ((glyph.x + x_offset) * scale + offset.0) as i32;
-            let y = ((glyph.y - y_offset) * scale + offset.1) as i32;
+                let x = ((glyph.x + x_offset) * scale + offset.0) as i32;
+                let y = ((glyph.y - y_offset) * scale + offset.1) as i32;
 
-            let cache_key = cosmic_text::CacheKey {
-                font_id: glyph.font_id,
-                glyph_id: glyph.glyph_id,
-                font_size_bits: (glyph.font_size * scale).to_bits(),
-                x_bin: SubpixelBin::Zero,
-                y_bin: SubpixelBin::Zero,
-                flags: glyph.cache_key_flags,
-            };
+                let cache_key = cosmic_text::CacheKey {
+                    font_id: glyph.font_id,
+                    glyph_id: glyph.glyph_id,
+                    font_size_bits: (glyph.font_size * scale).to_bits(),
+                    x_bin: SubpixelBin::Zero,
+                    y_bin: SubpixelBin::Zero,
+                    flags: glyph.cache_key_flags,
+                };
 
-            PhysicalGlyph { cache_key, x, y }
+                PhysicalGlyph { cache_key, x, y }
+            }
         }
     }
 }
@@ -399,12 +453,6 @@ impl TextRenderer {
 enum TextColorConversion {
     None = 0,
     ConvertToLinear = 1,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum GlyphonCacheKey {
-    Text(cosmic_text::CacheKey),
-    Custom(CustomGlyphCacheKey),
 }
 
 fn next_copy_buffer_size(size: u64) -> u64 {
@@ -471,15 +519,14 @@ fn prepare_glyph<R>(
 where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
-    let details = if let Some(details) = atlas.mask_atlas.glyph_cache.get_mut(&cache_key) {
+    let details = if let Some(details) = atlas.mask_atlas.glyph_cache.get(&cache_key) {
         details
-    } else if let Some(details) = atlas.color_atlas.glyph_cache.get_mut(&cache_key) {
+    } else if let Some(details) = atlas.color_atlas.glyph_cache.get(&cache_key) {
         details
     } else {
         let Some(image) = (get_glyph_image)(cache, font_system, &mut rasterize_custom_glyph) else {
             return Ok(None);
         };
-        println!("Rasterising glyph");
 
         let should_rasterize = image.width > 0 && image.height > 0;
 
@@ -550,9 +597,9 @@ where
         inner.glyph_cache.entry(cache_key).or_insert(GlyphDetails {
             width: image.width,
             height: image.height,
+            frequency: 1,
             gpu_cache,
             atlas_id,
-            frequency: 1,
             top: image.top,
             left: image.left,
         })
@@ -625,4 +672,53 @@ where
         ],
         depth,
     }))
+}
+
+fn swash_image(
+    font_system: &mut FontSystem,
+    context: &mut ScaleContext,
+    cache_key: CacheKey,
+) -> Option<SwashImage> {
+    let font = match font_system.get_font(cache_key.font_id) {
+        Some(some) => some,
+        None => {
+            return None;
+        }
+    };
+
+    // Build the scaler
+    let mut scaler = context
+        .builder(font.as_swash())
+        .size(f32::from_bits(cache_key.font_size_bits))
+        .hint(true)
+        .build();
+
+    // Compute the fractional offset-- you'll likely want to quantize this
+    // in a real renderer
+    let offset = Vector::new(cache_key.x_bin.as_float(), cache_key.y_bin.as_float());
+
+    // Select our source order
+    Render::new(&[
+        // Color outline with the first palette
+        Source::ColorOutline(0),
+        // Color bitmap with best fit selection mode
+        Source::ColorBitmap(StrikeWith::BestFit),
+        // Standard scalable outline
+        Source::Outline,
+    ])
+    // Select a subpixel format
+    .format(Format::Alpha)
+    // Apply the fractional offset
+    .offset(offset)
+    // .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
+    //     Some(Transform::skew(
+    //         Angle::from_degrees(14.0),
+    //         Angle::from_degrees(0.0),
+    //     ))
+    // } else {
+    //     None
+    // })
+    // .transform(Some(Transform::rotation(Angle::from_degrees(28.0))))
+    // Render the image
+    .render(&mut scaler, cache_key.glyph_id)
 }

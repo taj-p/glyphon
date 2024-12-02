@@ -9,6 +9,7 @@ mod custom_glyph;
 mod error;
 mod text_atlas;
 mod text_render;
+mod text_render2;
 mod viewport;
 
 pub use cache::Cache;
@@ -17,7 +18,8 @@ pub use custom_glyph::{
 };
 pub use error::{PrepareError, RenderError};
 pub use text_atlas::{ColorMode, TextAtlas};
-pub use text_render::TextRenderer;
+pub use text_render::{Config, TextRenderer};
+pub use text_render2::{PositionMapping, RenderableTextArea, TextRenderer2, TextRenderer2Builder};
 pub use viewport::Viewport;
 
 // Re-export all top-level types from `cosmic-text` for convenience.
@@ -46,6 +48,7 @@ pub(crate) struct GlyphDetails {
     height: u16,
     gpu_cache: GpuCacheStatus,
     atlas_id: Option<AllocId>,
+    frequency: u32,
     top: i16,
     left: i16,
 }
@@ -72,10 +75,12 @@ pub struct Resolution {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Params {
     screen_resolution: Resolution,
-    _pad: [u32; 2],
+    translation: [i32; 2],
+    scale: f32,
+    _padding: u32,
 }
 
 /// Controls the visible area of the text. Any text outside of the visible area will be clipped.
@@ -104,7 +109,7 @@ impl Default for TextBounds {
 }
 
 /// A text area containing text to be rendered along with its overflow behavior.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TextArea<'a> {
     /// The buffer containing the text to be rendered.
     pub buffer: &'a Buffer,
