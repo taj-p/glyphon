@@ -121,4 +121,5 @@ pub struct TextArea<'a> {
     pub default_color: Color,
     /// Additional custom glyphs to render.
     pub custom_glyphs: &'a [CustomGlyph],
+    pub embolden: f32,
 }

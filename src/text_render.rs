@@ -269,7 +269,7 @@ impl TextRenderer {
                          _rasterize_custom_glyph|
                          -> Option<GetGlyphImageResult> {
                             let image =
-                                cache.get_image_uncached(font_system, physical_glyph.cache_key)?;
+                                cache.get_image_uncached(font_system, physical_glyph.cache_key, text_area.embolden)?;
 
                             let content_type = match image.content {
                                 SwashContent::Color => ContentType::Color,
@@ -428,11 +428,6 @@ fn prepare_glyph<R>(
 where
     R: FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
 {
-    if atlas.mask_atlas.glyph_cache.contains(&cache_key) {
-        atlas.mask_atlas.promote(cache_key);
-    } else if atlas.color_atlas.glyph_cache.contains(&cache_key) {
-        atlas.color_atlas.promote(cache_key);
-    } else {
         let Some(image) = (get_glyph_image)(cache, font_system, &mut rasterize_custom_glyph) else {
             return Ok(None);
         };
@@ -514,7 +509,6 @@ where
                 left: image.left,
             },
         );
-    }
 
     let details = atlas.glyph(&cache_key).unwrap();
 
