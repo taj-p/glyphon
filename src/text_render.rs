@@ -283,8 +283,11 @@ impl TextRenderer {
                          font_system,
                          _rasterize_custom_glyph|
                          -> Option<GetGlyphImageResult> {
-                            let image =
-                                cache.get_image_uncached(font_system, physical_glyph.cache_key)?;
+                            let image = cache.get_image_uncached(
+                                font_system,
+                                physical_glyph.cache_key,
+                                0.0,
+                            )?;
 
                             let content_type = match image.content {
                                 SwashContent::Color => ContentType::Color,

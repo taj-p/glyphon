@@ -124,7 +124,9 @@ impl InnerAtlas {
 
             let (image_data, width, height) = match cache_key {
                 GlyphonCacheKey::Text(cache_key) => {
-                    let image = cache.get_image_uncached(font_system, cache_key).unwrap();
+                    let image = cache
+                        .get_image_uncached(font_system, cache_key, 0.0)
+                        .unwrap();
                     let width = image.placement.width as usize;
                     let height = image.placement.height as usize;
 

@@ -163,7 +163,7 @@ fn main() {
         .run_app(&mut Application {
             window_state: None,
             offset: 0,
-            scale: 1.0,
+            scale: 3.0,
             start_time: Instant::now(),
         })
         .unwrap();
@@ -248,6 +248,11 @@ impl WindowState {
             TextAtlas::with_color_mode(&device, &queue, &cache, swapchain_format, color_mode);
         let mut text_renderer = TextRenderer2Builder::new(&mut atlas, &device)
             .with_position_mapping(PositionMapping::Pixel)
+            .with_multisample(wgpu::MultisampleState {
+                count: 4,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            })
             .build();
 
         let attrs = Attrs::new().family(Family::SansSerif).weight(WEIGHT);
@@ -427,21 +432,45 @@ impl winit::application::ApplicationHandler for Application {
                     self.scale,
                 );
 
-                let frame = surface.get_current_texture().unwrap();
-                let view = frame.texture.create_view(&TextureViewDescriptor::default());
+                let output = surface.get_current_texture().unwrap();
+                let texture_view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+
+                let multisampled_render_target = device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Multisampled frame descriptor"),
+                        size: wgpu::Extent3d {
+                            width: surface_config.width,
+                            height: surface_config.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+
+                // A resolve target is only supported if the attachment actually uses anti-aliasing
+                // So if sample_count == 1 then we must render directly to the surface's buffer
+                let color_attachment = wgpu::RenderPassColorAttachment {
+                    view: &multisampled_render_target,
+                    resolve_target: Some(&texture_view),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(BG_COLOR),
+                        store: wgpu::StoreOp::Store,
+                    },
+                };
+
                 let mut encoder =
                     device.create_command_encoder(&CommandEncoderDescriptor { label: None });
                 {
                     let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                        label: None,
-                        color_attachments: &[Some(RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: Operations {
-                                load: LoadOp::Clear(BG_COLOR),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
+                        label: Some("RENDER PAS"),
+                        color_attachments: &[Some(color_attachment)],
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
@@ -451,17 +480,17 @@ impl winit::application::ApplicationHandler for Application {
                 }
 
                 queue.submit(Some(encoder.finish()));
-                frame.present();
+                output.present();
 
                 // self.offset += 1;
                 if self.offset > 100 {
                     self.offset = 0;
                 }
 
-                self.scale += 0.0001;
-                if self.scale > 2.0 {
-                    self.scale = 0.1;
-                }
+                // self.scale += 0.01;
+                // if self.scale > 2.0 {
+                //     self.scale = 0.1;
+                // }
                 window.request_redraw();
             }
             WindowEvent::CloseRequested => event_loop.exit(),
